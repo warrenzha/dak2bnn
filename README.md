@@ -12,7 +12,7 @@ $ pip install -r requirement.txt
 ```
 
 ### Toy Example
-Jupyter notebook for the toy example: [`examples/notebooks/5_GP_toy_example.ipynb`](examples/notebooks/2_DKL_example.ipynb)
+Jupyter notebook for the toy example: [`examples/notebooks/2_DKL_example.ipynb`](examples/notebooks/2_DKL_example.ipynb)
 
 ### UCI Regression
 ```bash
