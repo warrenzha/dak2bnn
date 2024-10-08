@@ -36,5 +36,5 @@ $ python run_cifar.py
 
 ## References
 1. Liang Ding, Rui Tuo, and Shahin Shahrampour. [A Sparse Expansion For Deep Gaussian Processes](https://www.tandfonline.com/doi/pdf/10.1080/24725854.2023.2210629). IISE Transactions (2023): 1-14.
-2. Andrew Gordon Wilson, Zhiting Hu, Ruslan Salakhutdinov, and Eric P. Xing. [Deep kernel learning." Artificial intelligence and statistics](https://proceedings.mlr.press/v51/wilson16.pdf). Artificial intelligence and statistics, pp. 370-378. PMLR, 2016.
+2. Andrew Gordon Wilson, Zhiting Hu, Ruslan Salakhutdinov, and Eric P. Xing. [Deep kernel learning](https://proceedings.mlr.press/v51/wilson16.pdf). Artificial intelligence and statistics, pp. 370-378. PMLR, 2016.
 3. Andrew Gordon Wilson, Zhiting Hu, Ruslan Salakhutdinov, and Eric P. Xing. [Stochastic variational deep kernel learning](https://proceedings.neurips.cc/paper_files/paper/2016/file/bcc0d400288793e8bdcd7c19a8ac0c2b-Paper.pdf). Advances in neural information processing systems 29 (2016).
