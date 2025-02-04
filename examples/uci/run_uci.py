@@ -23,6 +23,7 @@ from dataloader import UCIDatasets
 from nn_uci import NNUCI
 from nnsvgp_uci import NNSVGPUCI
 from svdkl_uci import SVDKLUCI
+from avdkl_uci import AVDKLUCI
 from dak_uci import DAKUCI
 
 # # Turn on cudNN benchmarking
@@ -63,8 +64,8 @@ parser.add_argument('--running-datasets',
 parser.add_argument('--model-names', 
                     type=str,
                     nargs='+',
-                    default=['nn', 'nnsvgp', 'svdkl', 'dak-mc', 'dak-uq'], 
-                    choices=['nn', 'nnsvgp', 'svdkl', 'dak-mc', 'dak-uq'], 
+                    default=['nn', 'nnsvgp', 'svdkl', 'avdkl', 'dak-mc', 'dak-cf'], 
+                    choices=['nn', 'nnsvgp', 'svdkl', 'avdkl', 'dak-mc', 'dak-cf'], 
                     help='Choose the DKL models to use.')
 parser.add_argument('--metrics', 
                     type=str,
@@ -271,9 +272,11 @@ def experiment_setup(dataset, batch_size, nn_out_features, model_name):
         UCIModel = NNSVGPUCI(args, nn_out_features=nn_out_features)
     elif model_name == 'svdkl':
         UCIModel = SVDKLUCI(args, nn_out_features=nn_out_features)
+    elif model_name == 'avdkl':
+        UCIModel = AVDKLUCI(args, nn_out_features=nn_out_features)
     elif model_name == 'dak-mc':
         UCIModel = DAKUCI(args, mc_sampling=True, nn_out_features=nn_out_features, batch_size=batch_size)
-    elif model_name == 'dak-uq':
+    elif model_name == 'dak-cf':
         UCIModel = DAKUCI(args, mc_sampling=False, nn_out_features=nn_out_features, batch_size=batch_size)
 
     ###################################
@@ -694,8 +697,8 @@ def barplot(dataset_names=['wine', 'gas']):
 
     width = 0.15 # width of each bar
 
-    model_names = ['nn', 'nnsvgp', 'svdkl', 'dak-mc', 'dak-uq']
-    labels = ['NN', 'NN+SVGP', 'SV-DKL', r'$\bf{DAK-MC}$', r'$\bf{DAK-UQ}$']
+    model_names = ['nn', 'nnsvgp', 'svdkl', 'avdkl', 'dak-mc', 'dak-cf']
+    labels = ['NN', 'NN+SVGP', 'SV-DKL', 'AV-DKL', r'$\bf{DAK-MC}$', r'$\bf{DAK-CF}$']
     xlabels = [dataset_name.upper() if dataset_name == 'kegg' else dataset_name.capitalize() for dataset_name in dataset_names]
 
     palette_colors = plt.get_cmap('tab10').colors
@@ -765,8 +768,8 @@ def barplot(dataset_names=['wine', 'gas']):
 
 def loss_plot(dataset_names=['wine', 'gas', 'parkinsons']):
     metric = 'train_losses'
-    model_names = ['nn', 'nnsvgp', 'svdkl', 'dak-mc', 'dak-uq'][-2:]
-    labels = ['NN', 'NN+SVGP', 'SV-DKL', 'DAK-MC', 'DAK-UQ'][-2:]
+    model_names = ['nn', 'nnsvgp', 'svdkl', 'avdkl', 'dak-mc', 'dak-cf'][-2:]
+    labels = ['NN', 'NN+SVGP', 'SV-DKL', 'AV-DKL', 'DAK-MC', 'DAK-CF'][-2:]
 
     sub_titles = [dataset_name.upper() if dataset_name == 'kegg' else dataset_name.capitalize() for dataset_name in dataset_names]
 
