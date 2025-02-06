@@ -1,10 +1,17 @@
 import torch
 import torch.nn.functional as F
 
-from dak.models.dak_variational import DAKMC
+from dak.models.dak_variational import DAKMC, MultitaskDAK
 import dak.models.deterministic.resnet_large as resnet_large
 from dak.utils.util import ece_score, accuracy
 from dak.utils.metrics import AverageMeter
+
+
+def warmup_lr_lambda(epoch):
+    if epoch < 5:  # Assuming a 5-epoch warm-up period
+        return epoch / 5
+    else:
+        return 1
 
 
 class DAKCIFAR:
@@ -30,12 +37,10 @@ class DAKCIFAR:
             num_dim = args.num_proj
             model = DAKMC(
                 feature_extractor=feature_extractor,
-                num_classes=args.num_classes,
+                num_tasks=args.num_classes,
                 num_features=num_dim,
                 inducing_level=6,
                 grid_bounds=(-1., 1.),
-                lengthscale=1.0,
-                embedding=torch.nn.Linear(feature_extractor.fc.in_features, num_dim, bias=False),
             )
             if args.pretrained:
                 model.feature_extractor.load_state_dict(
@@ -44,14 +49,12 @@ class DAKCIFAR:
         else:
             feature_extractor = resnet_large.__dict__[args.arch](num_classes=args.num_classes, classifier=False)
             num_dim = args.num_proj
-            model = DAKMC(
+            model = MultitaskDAK(
                 feature_extractor=feature_extractor,
-                num_classes=args.num_classes,
+                num_tasks=args.num_classes,
                 num_features=num_dim,
                 inducing_level=6,
                 grid_bounds=(-1., 1.),
-                lengthscale=1.0,
-                embedding=torch.nn.Linear(feature_extractor.fc.in_features, num_dim, bias=False),
             )
             if args.pretrained:
                 feature_extractor.load_state_dict(
@@ -59,9 +62,12 @@ class DAKCIFAR:
                 )
 
         self.model = model.to(self.device)
-        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=args.lr, momentum=0.9,
+
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=args.lr, momentum=0.9, nesterov=True,
                                          weight_decay=args.weight_decay)
+
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=args.epochs)
+        self.warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=warmup_lr_lambda)
 
         if args.fix_features and args.pretrained:
             for name, params in self.model.named_parameters():
@@ -104,6 +110,9 @@ class DAKCIFAR:
                     len(train_loader),
                     loss=losses,
                     top1=top1))
+
+        if epoch <= 5:
+            self.warmup_scheduler.step()
 
         return losses.avg, top1.avg
 
@@ -168,22 +177,18 @@ if __name__ == '__main__':
 
     model_10 = DAKMC(
         feature_extractor=resnet_18_model,
-        num_classes=10,
+        num_tasks=10,
         num_features=64,
         inducing_level=6,
         grid_bounds=(-1., 1.),
-        lengthscale=1.0,
-        embedding=torch.nn.Linear(resnet_18_model.fc.in_features, 64, bias=False),
     )
 
     model_100 = DAKMC(
         feature_extractor=resnet_34_model,
-        num_classes=100,
+        num_tasks=100,
         num_features=128,
         inducing_level=6,
         grid_bounds=(-1., 1.),
-        lengthscale=1.0,
-        embedding=torch.nn.Linear(resnet_34_model.fc.in_features, 128, bias=False),
     )
 
     total_resnet18_params = sum(p.numel() for p in model_10.parameters())

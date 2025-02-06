@@ -1,6 +1,7 @@
 import torch
+import gpytorch
 import torch.nn as nn
-from dak.layers import Amk1d, LinearReparameterization, Conv1dReparameterization, Conv1dFlipout, NoiseLayer
+from dak.layers import InducedPriorUnit, Amk1d, LinearReparameterization, LinearFlipout, Conv1dFlipout, NoiseLayer
 from dak.layers.functional import ScaleToBounds
 from dak.utils.sparse_design.design_class import HyperbolicCrossDesign
 from dak.kernels.laplace_kernel import LaplaceProductKernel
@@ -78,22 +79,73 @@ class DAKMC(nn.Module):
     """DAK for Classification with Monte Carlo Sampling"""
 
     def __init__(self, feature_extractor,
-                 num_features=64, num_classes=10,
-                 inducing_level=3, grid_bounds=(-10., 10.), lengthscale=1.,
-                 embedding=None):
+                 num_features=64, num_tasks=10,
+                 inducing_level=3, grid_bounds=(-1., 1.),
+                 ):
         super(DAKMC, self).__init__()
         self.feature_extractor = feature_extractor
-        self.embedding = embedding
-        self.lengthscale = lengthscale
+        self.embedding = nn.Linear(feature_extractor.fc.in_features, num_features, bias=False)
 
         self.scale_to_bounds = ScaleToBounds(grid_bounds[0], grid_bounds[1])
-        self.gp_activation = Amk1d(
+
+        self.gp_activation = InducedPriorUnit(
             in_features=num_features,
-            n_level=inducing_level,
-            input_lb=grid_bounds[0],
-            input_ub=grid_bounds[1],
-            design_class=HyperbolicCrossDesign,
-            kernel=LaplaceProductKernel(lengthscale=self.lengthscale),
+            induced_level=inducing_level,
+            kernel=LaplaceProductKernel(lengthscale=1.),  # Choose the general kernel you want to use
+            grid_bounds=grid_bounds,
+        )
+        self.gp_forward = LinearFlipout(
+            in_features=self.gp_activation.out_features,
+            out_features=num_tasks,
+            bias=False,
+        )
+
+        self._init_params()
+
+    def _init_params(self):
+        self.apply(_weights_init)
+
+    def forward(self, x, num_mc=1, return_kl=True):
+        features = self.feature_extractor(x)
+        if self.embedding is not None:
+            features = self.embedding(features)
+        features = self.scale_to_bounds(features)
+        features = self.gp_activation(features).flatten(start_dim=1)
+
+        output_ = []
+        kl_ = []
+        for mc_run in range(num_mc):
+            output, kl = self.gp_forward(features, return_kl=return_kl)
+            output_.append(output)
+            kl_.append(kl)
+
+        res = torch.mean(torch.stack(output_), dim=0)
+        kl = torch.mean(torch.stack(kl_), dim=0)
+
+        if return_kl:
+            return res, kl
+        else:
+            return res
+
+
+class MultitaskDAK(nn.Module):
+    """DAK for Multi-task regression/classification with Monte Carlo Sampling"""
+
+    def __init__(self, feature_extractor,
+                 num_features=64, num_tasks=10,
+                 inducing_level=3, grid_bounds=(-1., 1.),
+                 ):
+        super(MultitaskDAK, self).__init__()
+        self.feature_extractor = feature_extractor
+        self.embedding = nn.Linear(feature_extractor.fc.in_features, num_features, bias=False)
+
+        self.scale_to_bounds = ScaleToBounds(grid_bounds[0], grid_bounds[1])
+
+        self.gp_activation = InducedPriorUnit(
+            in_features=num_features,
+            induced_level=inducing_level,
+            kernel=gpytorch.kernels.MaternKernel(nu=2.5),  # Choose the general kernel you want to use
+            grid_bounds=grid_bounds,
         )
         self.gp_forward = Conv1dFlipout(
             in_channels=num_features,
@@ -102,8 +154,13 @@ class DAKMC(nn.Module):
             groups=num_features,
             bias=False,
         )
-        self.linear = nn.Linear(num_features, num_classes)
+        self.linear = nn.Linear(num_features, num_tasks, bias=True)
 
+        self._init_params()
+
+    def _init_params(self):
+        self.gp_activation.kernel.lengthscale = 1.
+        self.gp_activation.kernel.lengthscale.requires_grad = False
         self.apply(_weights_init)
 
     def forward(self, x, num_mc=1, return_kl=True):
@@ -121,8 +178,8 @@ class DAKMC(nn.Module):
             kl_.append(kl)
 
         res = torch.mean(torch.stack(output_), dim=0).squeeze(-1)
-        res = self.linear(res)
         kl = torch.mean(torch.stack(kl_), dim=0)
+        res = self.linear(res)
 
         if return_kl:
             return res, kl

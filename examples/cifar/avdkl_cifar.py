@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 import os
 import sys
 from pathlib import Path  # if you haven't already done so
@@ -12,15 +10,222 @@ import time
 import argparse
 import torch.backends.cudnn as cudnn
 
+
 import torch
+import torch.nn.functional as F
+import torch.optim.lr_scheduler as lr_scheduler
+import gpytorch
+import math
+
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
+import gpinfuser
 import dak.models.deterministic.resnet_large as resnet
-from svdkl_cifar import SVDKLCIFAR
-from nn_cifar import NNCIFAR
-from dak_cifar import DAKCIFAR
-from nnsvgp_cifar import NNSVGPCIFAR
+from dak.utils.metrics import AverageMeter
+from dak.utils.util import accuracy, ece_score
+
+
+def get_mean():
+    return gpytorch.means.ConstantMean()
+
+def get_kernel(num_features):
+    kernel = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+    kernel.initialize(**{'base_kernel.lengthscale': 15})
+    return kernel
+
+def get_likelihood(num_features, num_classes):
+    likelihood = gpytorch.likelihoods.SoftmaxLikelihood(num_features=num_features, num_classes=num_classes),
+    return likelihood
+
+def get_amortized_svgp(num_inducing, num_features):
+    return gpinfuser.models.AmortizedSVGP(get_mean(), get_kernel(num_features), num_inducing, 1)
+
+def get_feature_extractor():
+    return resnet.resnet18(num_classes=10, classifier=False)
+
+def get_variational_module(in_features, num_features, num_inducing, saturation):
+    return gpinfuser.nn.Variational(
+        in_features=in_features,
+        num_tasks=10,
+        num_inducing=num_inducing,
+        num_features=num_features,
+        saturation=saturation
+    )
+
+def get_amortized_variational_dkl(num_features, num_inducing, nonlinearity, saturation):
+    feature_extractor = get_feature_extractor()
+    variational_module = get_variational_module(num_features, num_features, num_inducing, saturation)
+    gplayer = get_amortized_svgp(num_inducing, num_features)
+    return gpinfuser.models.AVDKL(feature_extractor, variational_module, gplayer, get_likelihood(num_features, 10))
+
+def get_optimizer(model, lr=0.1, weight_decay=1e-4):
+    return torch.optim.SGD([
+        {'params': model.feature_extractor.parameters(), 'weight_decay': weight_decay},
+        {'params': model.variational_estimator.parameters(), 'weight_decay': weight_decay},
+        {'params': model.gplayer.hyperparameters(), 'lr': lr * 0.01},
+        {'params': model.likelihood.parameters()}
+    ], lr=lr, momentum=0.9, weight_decay=0)
+
+def get_scheduler(optimizer, epochs):
+    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+def warmup_lr_lambda(epoch):
+    if epoch < 5:  # Assuming a 5-epoch warm-up period
+        return epoch / 5
+    else:
+        return 1
+
+
+class AVDKLcifar:
+    def __init__(self, args):
+        if torch.cuda.is_available():
+            self.device = torch.device('cuda:0')
+        else:
+            self.device = torch.device('cpu')
+        print("Using: ", self.device)
+
+        torch.manual_seed(args.seed)
+
+        self.epochs = args.epochs
+        self.log_interval = args.log_interval
+        self.batch_size = args.batch_size
+        self.lr = args.lr
+        self.weight_decay = args.weight_decay
+        self.num_mc_train = args.num_mc_train
+        self.num_mc_test = args.num_mc_test
+
+        num_features = args.num_classes
+        num_inducing = 64
+
+        # feature_extractor = resnet.resnet18(num_classes=10, classifier=False)
+        feature_extractor = resnet.__dict__[args.arch](num_classes=num_features, classifier=True)
+        variational_module = gpinfuser.nn.Variational(
+            in_features=num_features,
+            num_tasks=num_features,
+            num_inducing=num_inducing,
+            num_features=num_features,
+        )
+        gplayer = get_amortized_svgp(num_inducing, num_features)
+
+        likelihood = gpytorch.likelihoods.SoftmaxLikelihood(num_features=num_features, num_classes=args.num_classes).to(self.device)
+        self.model = gpinfuser.models.AVDKL(feature_extractor, variational_module, gplayer, likelihood).to(self.device)
+
+        if args.pretrained:
+            self.model.feature_extractor.load_state_dict(
+                torch.load('./checkpoint/nn_cifar_100_batch_128.pth')['state_dict']
+            )
+
+        self.optimizer = get_optimizer(self.model, lr=self.lr, weight_decay=self.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=args.epochs)
+        self.warmup_scheduler = lr_scheduler.LambdaLR(self.optimizer, lr_lambda=warmup_lr_lambda)
+
+        if args.fix_features and args.pretrained:
+            for name, params in self.model.named_parameters():
+                if "feature_extractor" in name:
+                    params.requires_grad = False
+
+    def train(self, train_loader, epoch):
+        self.model.train()
+        self.model.likelihood.train()
+
+        losses = AverageMeter('Loss', ':.4e')
+        top1 = AverageMeter('Acc@1', ':6.2f')
+
+        mll = gpytorch.mlls.VariationalELBO(self.model.likelihood, self.model.gplayer,
+                                            num_data=len(train_loader.dataset))
+        with gpytorch.settings.num_likelihood_samples(self.num_mc_train):
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data, target = data.to(self.device), target.to(self.device)
+                self.optimizer.zero_grad()
+                output = self.model(data)
+                loss = -mll(output, target)
+                loss.backward(torch.ones_like(loss))
+                self.optimizer.step()
+
+                # output_dist = self.model.likelihood(output)
+                # output_probs = output_dist.mean.squeeze()
+                # prec1 = accuracy(output_probs, target)[0]
+
+                output_probs = self.model.likelihood(output).probs.mean(0).float()
+                prec1 = accuracy(output_probs.data, target)[0]
+
+                loss = loss.float().mean()
+                losses.update(loss.item(), data.size(0))
+                top1.update(prec1.item(), data.size(0))
+
+                if batch_idx % self.log_interval == 0:
+                    print('Epoch: [{0}][{1}/{2}]\t'
+                          'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                          'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
+                        epoch,
+                        batch_idx,
+                        len(train_loader),
+                        loss=losses,
+                        top1=top1))
+        if epoch <= 5:
+            self.warmup_scheduler.step()
+
+        return losses.avg, top1.avg
+
+    def test(self, test_loader, ece_bins=10):
+        self.model.eval()
+        self.model.likelihood.eval()
+
+        correct = 0
+        nll = 0
+        ece = 0
+        batch_count = 0
+        with torch.no_grad(), gpytorch.settings.num_likelihood_samples(self.num_mc_test):
+            for batch_idx, (data, target) in enumerate(test_loader):
+                data, target = data.to(self.device), target.to(self.device)
+                output = self.model.likelihood(self.model(data))  # samples from the predictive distribution
+
+                output_probs = output.probs.mean(0)
+                pred = output_probs.argmax(-1)
+
+                correct += pred.eq(target.view_as(pred)).sum().item()
+                nll += F.nll_loss(torch.log(output.probs.mean(0)), target, reduction='sum').item()
+                ece += ece_score(output_probs.cpu().numpy(), target.cpu().numpy(), n_bins=ece_bins)
+                batch_count += 1
+
+        acc = 100. * correct / len(test_loader.dataset)
+        nll /= len(test_loader.dataset)
+        ece /= batch_count
+
+        return acc, nll, ece
+
+    def validate(self, val_loader):
+        self.model.eval()
+        self.model.likelihood.eval()
+
+        losses = AverageMeter('Loss', ':.4e')
+        top1 = AverageMeter('Acc@1', ':6.2f')
+        nll = AverageMeter('NLL', ':.4e')
+        mll = gpytorch.mlls.VariationalELBO(self.model.likelihood, self.model.gplayer,
+                                            num_data=len(val_loader.dataset))
+        with torch.no_grad(), gpytorch.settings.num_likelihood_samples(16):
+            for i, (data, target) in enumerate(val_loader):
+                data, target = data.to(self.device), target.to(self.device)
+                output = self.model(data)
+                val_loss = -mll(output, target)
+
+                output_probs = self.model.likelihood(output).probs.mean(0).float()
+                loss = val_loss.float().mean()
+                neg_log_likelihood = F.nll_loss(torch.log(output_probs), target)
+
+                # measure accuracy and record loss
+                prec1 = accuracy(output_probs.data, target)[0]
+                losses.update(loss.item(), data.size(0))
+                top1.update(prec1.item(), data.size(0))
+                nll.update(neg_log_likelihood.item(), data.size(0))
+
+        print(
+            '\nValidation set: Average loss: {:.4f},  Prec@1: {}/{} ({:.2f}%)\n'.format(
+                losses.avg, top1.sum / 100, len(val_loader.dataset),
+                top1.avg))
+
+        return top1.avg, nll.avg
 
 
 model_names = sorted(
@@ -36,7 +241,7 @@ parser.add_argument('--mode',
                     help='train | test')
 parser.add_argument('--model',
                     type=str,
-                    default='dak',
+                    default='avdkl',
                     choices=['nn', 'nnsvgp', 'svdkl', 'dak'],
                     help='Choose the DKL models to use.')
 parser.add_argument('--arch',
@@ -45,7 +250,7 @@ parser.add_argument('--arch',
                     default='resnet18',
                     choices=model_names,
                     help='model architecture: ' + ' | '.join(model_names) +
-                         ' (default: resnet20)')
+                         ' (default: resnet18)')
 parser.add_argument('--num_classes',
                     type=int,
                     default=10,
@@ -59,7 +264,7 @@ parser.add_argument('-j',
                     help='number of data loading workers (default: 8)')
 parser.add_argument('--seed',
                     type=int,
-                    default=1,
+                    default=10,
                     metavar='S',
                     help='random seed (default: 10)')
 parser.add_argument('-pretrained',
@@ -84,7 +289,7 @@ parser.add_argument('--start-epoch',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b',
                     '--batch-size',
-                    default=128,
+                    default=1024,
                     type=int,
                     metavar='N',
                     help='mini-batch size (default: 128)')
@@ -179,15 +384,8 @@ def main():
     ###################################
     # Model Setup
     ###################################
-    assert args.model in ['dak', 'nnsvgp', 'svdkl', 'nn']
-    if args.model == 'dak':
-        cifar = DAKCIFAR(args)
-    elif args.model == 'nnsvgp':
-        cifar = NNSVGPCIFAR(args)
-    elif args.model == 'svdkl':
-        cifar = SVDKLCIFAR(args)
-    else:
-        cifar = NNCIFAR(args)
+    assert args.model in ['avdkl']
+    cifar = AVDKLcifar(args)
 
     ###################################
     # optionally resume from a checkpoint
@@ -361,3 +559,11 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+    ## Results: CIFAR-10
+    ## batch size 128: 77.61, 1.795, 0.164; 77.34, 1.779, 0.167
+    ## batch size 1024: 77.0, 2.305, 0.175; 77.15, 2.348, 0.176
+
+    ## Results: CIFAR-100
+    ## batch size 128: 93.77, 0.411, 0.052; 94.69, 0.292, 0.043
+    ## batch size 1024: 93.23, 0.424, 0.053; 93.42, 0.455, 0.054
