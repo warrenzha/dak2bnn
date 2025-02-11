@@ -46,6 +46,6 @@ If you find our work relevant to your research, please cite:
     title={From Deep Additive Kernel Learning to Last-Layer Bayesian Neural Networks via Induced Prior Approximation},
     author={Wenyuan Zhao and Haoyuan Chen and Tie Liu and Rui Tuo and Chao Tian},
     year={2025},
-    journal={2025 International Conference on Artificial Intelligence and Statistics}
+    journal={International Conference on Artificial Intelligence and Statistics}
 }
 ```
