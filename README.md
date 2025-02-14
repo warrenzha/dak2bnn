@@ -42,10 +42,9 @@ $ python run_cifar.py
 ## Citation
 If you find our work relevant to your research, please cite:
 ```bibtex
-@article{
-    title={From Deep Additive Kernel Learning to Last-Layer Bayesian Neural Networks via Induced Prior Approximation},
-    author={Wenyuan Zhao and Haoyuan Chen and Tie Liu and Rui Tuo and Chao Tian},
-    year={2025},
-    journal={International Conference on Artificial Intelligence and Statistics}
+@inproceedings{zhaodeep,
+  title={From Deep Additive Kernel Learning to Last-Layer Bayesian Neural Networks via Induced Prior Approximation},
+  author={Zhao, Wenyuan and Chen, Haoyuan and Liu, Tie and Tuo, Rui and Tian, Chao},
+  booktitle={The 28th International Conference on Artificial Intelligence and Statistics}
 }
 ```
