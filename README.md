@@ -1,15 +1,15 @@
 # Deep Additive Kernel (DAK)
-This repository is a PyTorch implementation of **D**eep **A**dditive **K**ernel (DAK) model.
+This repository implements **D**eep **A**dditive **K**ernel (DAK) model in "[From Deep Additive Kernel Learning to Last-Layer Bayesian Neural Networks via Induced Prior Approximation](https://arxiv.org/abs/2502.10540)" (AISTATS 2025).
 
 ## Model
 [Model architecture of Deep Additive Kernel (DAK).](assets/DAK.pdf)
 
 ## Benchmark
-- DNN
+- DNN ([torchvision](https://pytorch.org/vision/stable/models.html))
 - NN+SVGP ([GPyTorch](https://docs.gpytorch.ai/en/v1.6.0/examples/04_Variational_and_Approximate_GPs/SVGP_Regression_CUDA.html))
 - SV-DKL ([GPyTorch](https://docs.gpytorch.ai/en/v1.6.0/examples/06_PyTorch_NN_Integration_DKL/Deep_Kernel_Learning_DenseNet_CIFAR_Tutorial.html))
-- AV-DKL ([`gpinfuser`](gpinfuser) from this [repo](https://github.com/alanlsmatias/amortized-variational-dkl))
-- DAK (package [`dak`](dak))
+- AV-DKL ([`gpinfuser`](gpinfuser) folder from this [repo](https://github.com/alanlsmatias/amortized-variational-dkl))
+- DAK ([`dak`](dak) folder)
 
 ## Usage
 To reproduce the experiments, first install the required packages.
