@@ -1,13 +1,14 @@
 from .base_variational_layer import *
-from .linear import LinearReparameterization, LinearFlipout
+from .linear import LinearReparameterization, LinearFlipout, LightWeightLinear
 from .noise import NoiseLayer
 
 from .conv import Conv1dReparameterization, Conv2dReparameterization, Conv1dFlipout
 from .functional import ReLU, ReLUN, MinMax, ScaleToBounds
-from .activation import Amk1d, Amk2d, InducedPriorUnit
+from .activation import Amk1d, Amk2d, InducedPriorUnit, AMK
 from . import functional
 
 __all__ = [
+    "LightWeightLinear",
     "LinearReparameterization",
     "LinearFlipout",
     "Conv1dReparameterization",
@@ -20,5 +21,6 @@ __all__ = [
     "InducedPriorUnit",
     "Amk1d",
     "Amk2d",
+    "AMK",
     "NoiseLayer",
 ]

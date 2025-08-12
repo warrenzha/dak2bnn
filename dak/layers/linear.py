@@ -19,6 +19,217 @@ from collections import namedtuple
 mean_var_tuple = namedtuple('mean_var_tuple', ['mean', 'var'])  # Define a named tuple
 
 
+
+class LightWeightLinear(_BaseVariationalLayer):
+    def __init__(self,
+                 in_features,
+                 out_features,
+                 prior_mean=0,
+                 prior_variance=1,
+                 posterior_mu_init=0,
+                 posterior_rho_init=-3.0,
+                 bias=True,):
+        super(LightWeightLinear, self).__init__()
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.prior_mean = prior_mean
+        self.prior_variance = prior_variance
+        self.posterior_mu_init = posterior_mu_init,  # mean of weight
+        self.posterior_rho_init = posterior_rho_init,  # variance of weight --> sigma = log (1 + exp(rho))
+        self.bias = bias
+
+        self.mu_weight = Parameter(torch.Tensor(out_features, in_features))
+        self.rho_weight = Parameter(torch.Tensor(out_features, in_features))
+        self.register_buffer('eps_weight',
+                             torch.Tensor(out_features, in_features),
+                             persistent=False)
+        self.register_buffer('prior_weight_mu',
+                             torch.Tensor(out_features, in_features),
+                             persistent=False)
+        self.register_buffer('prior_weight_sigma',
+                             torch.Tensor(out_features, in_features),
+                             persistent=False)
+
+        if bias:
+            self.mu_bias = Parameter(torch.Tensor(out_features))
+            self.rho_bias = Parameter(torch.Tensor(out_features))
+            self.register_buffer(
+                'eps_bias',
+                torch.Tensor(out_features),
+                persistent=False)
+            self.register_buffer(
+                'prior_bias_mu',
+                torch.Tensor(out_features),
+                persistent=False)
+            self.register_buffer('prior_bias_sigma',
+                                 torch.Tensor(out_features),
+                                 persistent=False)
+        else:
+            self.register_buffer('prior_bias_mu', None, persistent=False)
+            self.register_buffer('prior_bias_sigma', None, persistent=False)
+            self.register_parameter('mu_bias', None)
+            self.register_parameter('rho_bias', None)
+            self.register_buffer('eps_bias', None, persistent=False)
+
+        self.init_parameters()
+        self.quant_prepare = False
+
+    def prepare(self):
+        self.qint_quant = nn.ModuleList([torch.quantization.QuantStub(
+            QConfig(weight=MinMaxObserver.with_args(dtype=torch.qint8, qscheme=torch.per_tensor_symmetric),
+                    activation=MinMaxObserver.with_args(dtype=torch.qint8, qscheme=torch.per_tensor_symmetric))) for _
+            in range(5)])
+        self.quint_quant = nn.ModuleList([torch.quantization.QuantStub(
+            QConfig(weight=MinMaxObserver.with_args(dtype=torch.quint8),
+                    activation=MinMaxObserver.with_args(dtype=torch.quint8))) for _ in range(2)])
+        self.dequant = torch.quantization.DeQuantStub()
+        self.quant_prepare = True
+
+    def init_parameters(self):
+        self.prior_weight_mu.fill_(self.prior_mean)
+        self.prior_weight_sigma.fill_(self.prior_variance)
+
+        self.mu_weight.data.normal_(mean=self.posterior_mu_init[0], std=0.1)
+        self.rho_weight.data.normal_(mean=self.posterior_rho_init[0], std=0.1)
+        if self.mu_bias is not None:
+            self.prior_bias_mu.fill_(self.prior_mean)
+            self.prior_bias_sigma.fill_(self.prior_variance)
+            self.mu_bias.data.normal_(mean=self.posterior_mu_init[0], std=0.1)
+            self.rho_bias.data.normal_(mean=self.posterior_rho_init[0], std=0.1)
+
+    def kl_loss(self):
+        sigma_weight = torch.log1p(torch.exp(self.rho_weight))
+        kl = self.kl_div(
+            self.mu_weight,
+            sigma_weight,
+            self.prior_weight_mu,
+            self.prior_weight_sigma)
+        if self.mu_bias is not None:
+            sigma_bias = torch.log1p(torch.exp(self.rho_bias))
+            kl += self.kl_div(self.mu_bias, sigma_bias,
+                              self.prior_bias_mu, self.prior_bias_sigma)
+        return kl
+
+    def dense_forward(self, x, return_kl=True):
+        r"""
+        Forward the bayesian Linear layer.
+
+        :param x: Training data of shape :math:`(n,d)`.
+        :type x: torch.Tensor.float
+        :param return_kl: Return KL-divergence. Default: `True`.
+        :type return_kl: bool, optional
+
+        :return: The output and KL-divergence.
+        """
+
+        if self.dnn_to_bnn_flag:
+            return_kl = False
+        sigma_weight = torch.log1p(torch.exp(self.rho_weight))
+        eps_weight = self.eps_weight.data.normal_()
+        tmp_result = sigma_weight * eps_weight
+        weight = self.mu_weight + tmp_result
+
+        if return_kl:
+            kl_weight = self.kl_div(self.mu_weight, sigma_weight,
+                                    self.prior_weight_mu, self.prior_weight_sigma)
+        bias = None
+
+        if self.mu_bias is not None:
+            sigma_bias = torch.log1p(torch.exp(self.rho_bias))
+            bias = self.mu_bias + (sigma_bias * self.eps_bias.data.normal_())
+            if return_kl:
+                kl_bias = self.kl_div(self.mu_bias, sigma_bias, self.prior_bias_mu,
+                                      self.prior_bias_sigma)
+
+        out = F.linear(x, weight, bias)
+
+        if self.quant_prepare:
+            # quint8 quantstrat
+            x = self.quint_quant[0](x)  # input
+            out = self.quint_quant[1](out)  # output
+
+            # qint8 quantstrat
+            sigma_weight = self.qint_quant[0](sigma_weight)  # weight
+            mu_weight = self.qint_quant[1](self.mu_weight)  # weight
+            eps_weight = self.qint_quant[2](eps_weight)  # random variable
+            tmp_result = self.qint_quant[3](tmp_result)  # multiply activation
+            weight = self.qint_quant[4](weight)  # add activation
+
+        if return_kl:
+            if self.mu_bias is not None:
+                kl = kl_weight + kl_bias
+            else:
+                kl = kl_weight
+
+            return out, kl
+
+        return out
+
+    def sparse_forward(self, x, num_mc=10, return_kl=True):
+        if self.dnn_to_bnn_flag:
+            return_kl = False
+
+        B, D = x.shape
+        outputs = []
+        kl_sum = 0
+        for i in range(B):
+            x_ = x[i]
+            nonzero_indices = torch.nonzero(torch.abs(x) < 1e-5, as_tuple=True)[0]
+            x_nz = x_[nonzero_indices]  # shape: (k,)
+
+            mu_weight_nz = self.mu_weight[:, nonzero_indices]  # shape: [10, k]
+            sigma_weight_nz = torch.log1p(torch.exp(self.rho_weight[:, nonzero_indices]))
+            prior_weight_mu_nz = self.prior_weight_mu[:, nonzero_indices]
+            prior_weight_sigma_nz = self.prior_weight_sigma[:, nonzero_indices]
+
+            out_ = []
+            kl_ = []
+            for mc_run in range(num_mc):
+                eps_weight_selected = self.eps_weight[:, nonzero_indices].data.normal_()
+                tmp_result = sigma_weight_nz * eps_weight_selected
+                weight = mu_weight_nz + tmp_result
+
+                bias = None
+                kl = 0
+                if self.mu_bias is not None:
+                    sigma_bias = torch.log1p(torch.exp(self.rho_bias))
+                    bias = self.mu_bias + (sigma_bias * self.eps_bias.data.normal_())
+                    if return_kl:
+                        kl_weight = self.kl_div(mu_weight_nz, sigma_weight_nz,
+                                                prior_weight_mu_nz, prior_weight_sigma_nz)
+                        kl_bias = self.kl_div(self.mu_bias, sigma_bias, self.prior_bias_mu,
+                                              self.prior_bias_sigma)
+                        kl = kl_weight + kl_bias
+                else:
+                    if return_kl:
+                        kl_weight = self.kl_div(mu_weight_nz, sigma_weight_nz,
+                                                prior_weight_mu_nz, prior_weight_sigma_nz)
+                        kl = kl_weight
+
+                out = F.linear(x_nz, weight, bias)
+                out_.append(out)
+                kl_.append(kl)
+
+            res = torch.mean(torch.stack(out_), dim=0)
+            outputs.append(res)
+            if return_kl:
+                kl = torch.mean(torch.stack(kl_), dim=0)
+                kl_sum += kl
+
+        if return_kl:
+            return torch.stack(outputs, dim=0), kl_sum
+
+        return torch.stack(outputs, dim=0)
+
+    def forward(self, x, num_mc=10, return_kl=True, lightweight=False):
+        if lightweight:
+            return self.sparse_forward(x, num_mc=num_mc, return_kl=return_kl)
+
+        return self.dense_forward(x, return_kl=return_kl)
+
+
+
 class LinearReparameterization(_BaseVariationalLayer):
     """
     Implements Linear layer with reparameterization trick. Inherits from bayesian_torch.layers.BaseVariationalLayer_

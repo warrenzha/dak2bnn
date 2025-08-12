@@ -121,3 +121,67 @@ class Amk2d(nn.Module):
         out = out.view(-1, self.out_channels, *pixel_size)
 
         return out
+
+
+class AMK(nn.Module):
+    r"""
+    Implements additive markov GP as an activation layer using additive structure.
+
+    .. math::
+
+        \begin{equation*}
+            \left\{ k\left( x_i, X^{SG} \right)R^{-1} \right\}^{d}_{i=1}
+        \end{equation*}
+
+    :param in_features: Size of each input sample.
+    :type in_features: int
+    :param n_level: Level of induced points for approximating GP. (Default: `3`.)
+    :type n_level: int, optional
+    :param input_lb: Input lower boundary. (Default: `-2`.)
+    :type input_lb: float, optional
+    :param input_ub: Input upper boundary. (Default: `2`.)
+    :type input_ub: float, optional
+    :param design_class: Base design class of sparse grid. (Default: `HyperbolicCrossDesign`.)
+    :type design_class: class, dmgp.utils.sparse_design.design_class, optional
+    :param kernel: Kernel function of deep GP. (Default: `LaplaceProductKernel(lengthscale=1.)`.)
+    :type kernel: class, dmgp.kernels, optional
+    """
+
+    def __init__(self,
+                 in_features,
+                 n_level=3,
+                 input_lb=-2,
+                 input_ub=2,
+                 kernel=LaplaceProductKernel(lengthscale=1.),
+                 design_class=HyperbolicCrossDesign,
+                 ):
+        super().__init__()
+
+        self.kernel = kernel
+
+        dyadic_design = design_class(dyadic_sort=True, return_neighbors=True)(deg=n_level, input_lb=input_lb, input_ub=input_ub)
+        chol_inv = mk_chol_inv(dyadic_design=dyadic_design, markov_kernel=kernel, upper=True)  # [m, m] size tensor
+        design_points = dyadic_design.points.reshape(-1, 1)  # [m, 1] size tensor
+
+        self.register_buffer('design_points',
+                             design_points)  # [m,d] size tensor, sparse grid points X^{SG} of dyadic sort
+        self.register_buffer('chol_inv',
+                             chol_inv)  # [m,m] size tensor, inverse of Cholesky decomposition of kernel(X^{SG},X^{SG})
+        self.out_features = design_points.shape[0] * in_features  # m*d
+
+    def forward(self, x):
+        r"""
+        Computes the element-wise markov kernel activation of :math:`\mathbf x`.
+
+        :param x: [N, C] size tensor, N is the batch size, C is the channels of input, L is the sequence length
+        :type x: torch.Tensor.float
+
+        :return: [N, C*L*M] size tensor, kernel(input, sparse_grid) @ chol_inv
+        """
+
+        out = torch.flatten(x, start_dim=1).unsqueeze(dim=-1)  # reshape x of size [N, C, L] --> size [N, C*L, 1]
+        out = self.kernel(out, self.design_points)  # [N, C*L, M] size tenosr
+        out = torch.matmul(out, self.chol_inv)  # [N, C*L, M] size tensor
+        out = torch.flatten(out, start_dim=1)  # [N, C*L*M] size tensor
+
+        return out
