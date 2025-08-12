@@ -175,7 +175,7 @@ class LightWeightLinear(_BaseVariationalLayer):
         kl_sum = 0
         for i in range(B):
             x_ = x[i]
-            nonzero_indices = torch.nonzero(torch.abs(x) < 1e-5, as_tuple=True)[0]
+            nonzero_indices = torch.nonzero(torch.abs(x_) < 1e-5, as_tuple=True)[0]
             x_nz = x_[nonzero_indices]  # shape: (k,)
 
             mu_weight_nz = self.mu_weight[:, nonzero_indices]  # shape: [10, k]
